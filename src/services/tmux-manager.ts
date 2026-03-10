@@ -5,15 +5,18 @@ import type { Result } from "../types/result.js";
 import type { TmuxSession } from "../types/session.js";
 import { ok, fail } from "../types/result.js";
 import { config } from "../config.js";
+import { filteredEnv } from "../utils.js";
 
 const execFileAsync = promisify(execFileCb);
 
 const MAX_CAPTURE_BYTES = 50 * 1024; // 50 KB
 
-function safeEnv(): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    Object.entries(process.env).filter(([k]) => k !== "BOT_TOKEN"),
-  );
+function getStderr(err: unknown): string {
+  if (typeof err === "object" && err !== null && "stderr" in err) {
+    const stderr = (err as Record<string, unknown>).stderr;
+    return typeof stderr === "string" ? stderr : "";
+  }
+  return "";
 }
 
 function createTmuxManager() {
@@ -26,7 +29,7 @@ function createTmuxManager() {
           "-F",
           "#{session_name}|#{session_attached}|#{session_windows}|#{session_created}",
         ],
-        { env: safeEnv() },
+        { env: filteredEnv },
       );
 
       const sessions: TmuxSession[] = stdout
@@ -46,7 +49,7 @@ function createTmuxManager() {
       return ok(sessions);
     } catch (err: unknown) {
       // tmux returns exit code 1 when no sessions exist or server isn't running
-      const stderr = (err as { stderr?: string }).stderr ?? "";
+      const stderr = getStderr(err);
       if (
         stderr.includes("no server running") ||
         stderr.includes("no sessions") ||
@@ -61,7 +64,7 @@ function createTmuxManager() {
   async function sessionExists(name: string): Promise<boolean> {
     try {
       await execFileAsync("tmux", ["has-session", "-t", name], {
-        env: safeEnv(),
+        env: filteredEnv,
       });
       return true;
     } catch {
@@ -78,7 +81,7 @@ function createTmuxManager() {
       await execFileAsync(
         "tmux",
         ["send-keys", "-t", target, "-l", text],
-        { env: safeEnv() },
+        { env: filteredEnv },
       );
 
       // Wait the configured delay
@@ -90,9 +93,25 @@ function createTmuxManager() {
       await execFileAsync(
         "tmux",
         ["send-keys", "-t", target, "Enter"],
-        { env: safeEnv() },
+        { env: filteredEnv },
       );
 
+      return ok(undefined);
+    } catch (err: unknown) {
+      return fail("Failed to send keys to tmux", err);
+    }
+  }
+
+  async function sendKeysRaw(
+    target: string,
+    text: string,
+  ): Promise<Result<void>> {
+    try {
+      await execFileAsync(
+        "tmux",
+        ["send-keys", "-t", target, "-l", text],
+        { env: filteredEnv },
+      );
       return ok(undefined);
     } catch (err: unknown) {
       return fail("Failed to send keys to tmux", err);
@@ -104,7 +123,7 @@ function createTmuxManager() {
       await execFileAsync(
         "tmux",
         ["send-keys", "-t", target, "C-c"],
-        { env: safeEnv() },
+        { env: filteredEnv },
       );
       return ok(undefined);
     } catch (err: unknown) {
@@ -117,7 +136,7 @@ function createTmuxManager() {
       const { stdout } = await execFileAsync(
         "tmux",
         ["capture-pane", "-p", "-J", "-S", "-200", "-t", target],
-        { env: safeEnv() },
+        { env: filteredEnv },
       );
 
       let cleaned = stripVTControlCharacters(stdout);
@@ -139,7 +158,7 @@ function createTmuxManager() {
       const { stdout } = await execFileAsync(
         "tmux",
         ["display-message", "-p", "-t", target, "#{pane_current_path}"],
-        { env: safeEnv() },
+        { env: filteredEnv },
       );
 
       return ok(stdout.trim());
@@ -152,6 +171,7 @@ function createTmuxManager() {
     listSessions,
     sessionExists,
     sendKeys,
+    sendKeysRaw,
     sendInterrupt,
     capturePane,
     getPaneWorkingDir,

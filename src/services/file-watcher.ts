@@ -1,9 +1,10 @@
-import { watch, readFileSync, lstatSync, statSync } from "node:fs";
+import { watch, readFileSync, statSync } from "node:fs";
 import type { FSWatcher } from "node:fs";
-import { join, sep, extname, relative } from "node:path";
+import { join, sep, extname } from "node:path";
 import { InputFile, Bot } from "grammy";
 import type { AppContext } from "../types/context.js";
 import { EXCLUDED_DIRS } from "../constants.js";
+import { escapeHtml, isSymlink } from "../utils.js";
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
@@ -29,15 +30,6 @@ function createFileWatcher(bot: Bot<AppContext>) {
 
   function isMarkdownFile(filePath: string): boolean {
     return extname(filePath).toLowerCase() === ".md";
-  }
-
-  function isSymlink(filePath: string): boolean {
-    try {
-      const stat = lstatSync(filePath);
-      return stat.isSymbolicLink();
-    } catch {
-      return false;
-    }
   }
 
   function getFileSize(filePath: string): number | null {
@@ -176,13 +168,6 @@ function createFileWatcher(bot: Bot<AppContext>) {
     stop,
     stopAll,
   };
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
 }
 
 type FileWatcher = ReturnType<typeof createFileWatcher>;

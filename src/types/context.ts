@@ -1,6 +1,6 @@
 import type { Context } from "grammy";
+import type { FileFlavor } from "@grammyjs/files";
 
-// For now, AppContext is just Context. We'll add SessionFlavor later if needed.
-type AppContext = Context;
+type AppContext = FileFlavor<Context>;
 
 export type { AppContext };

@@ -1,10 +1,19 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, lstatSync, chmodSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { z } from "zod";
 import type { SessionMapping } from "../types/session.js";
+import { isSymlink } from "../utils.js";
 
 const CONFIG_DIR = join(homedir(), ".telegram-agent-bridge");
 const SESSIONS_FILE = join(CONFIG_DIR, "sessions.json");
+
+const storedMappingSchema = z.object({
+  tmuxSession: z.string(),
+  topicId: z.number(),
+  projectRoot: z.string(),
+  createdAt: z.string(),
+});
 
 interface StoredMapping {
   readonly tmuxSession: string;
@@ -19,15 +28,6 @@ function ensureConfigDir(): void {
   }
 }
 
-function isSymlink(filePath: string): boolean {
-  try {
-    const stat = lstatSync(filePath);
-    return stat.isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-
 function createSessionMapper() {
   const mappings = new Map<string, SessionMapping>();
 
@@ -39,13 +39,15 @@ function createSessionMapper() {
     try {
       const raw = readFileSync(SESSIONS_FILE, "utf-8");
       const parsed: unknown = JSON.parse(raw);
-      if (!Array.isArray(parsed)) {
+      const result = z.array(storedMappingSchema).safeParse(parsed);
+      if (!result.success) {
         console.warn(
-          `[SessionMapper] ${new Date().toISOString()} sessions.json is not an array, resetting`,
+          `[SessionMapper] ${new Date().toISOString()} Invalid sessions.json, resetting:`,
+          result.error.message,
         );
         return [];
       }
-      return parsed as StoredMapping[];
+      return result.data;
     } catch (err: unknown) {
       console.warn(
         `[SessionMapper] ${new Date().toISOString()} Corrupted sessions.json, resetting:`,

@@ -6,6 +6,7 @@ import type { SessionMapper } from "../services/session-mapper.js";
 import type { OutputMonitor } from "../services/output-monitor.js";
 import type { FileWatcher } from "../services/file-watcher.js";
 import { config } from "../config.js";
+import { escapeHtml } from "../utils.js";
 
 const POLL_INTERVAL_MS = 10_000;
 
@@ -13,8 +14,8 @@ function startSessionDiscovery(
   bot: Bot<AppContext>,
   tmux: TmuxManager,
   sessionMapper: SessionMapper,
-  outputMonitor?: OutputMonitor,
-  fileWatcher?: FileWatcher,
+  outputMonitor: OutputMonitor,
+  fileWatcher: FileWatcher,
 ): () => void {
   const ignoredSessions = new Set<string>();
 
@@ -72,8 +73,8 @@ function startSessionDiscovery(
     sessionMapper.add(sessionName, topic.message_thread_id, workingDir);
 
     // Start monitoring for the newly connected session
-    outputMonitor?.start(sessionName);
-    fileWatcher?.start(workingDir, config.CHAT_ID, topic.message_thread_id);
+    outputMonitor.start(sessionName);
+    fileWatcher.start(workingDir, config.CHAT_ID, topic.message_thread_id);
 
     await bot.api.sendMessage(
       config.CHAT_ID,
@@ -106,13 +107,6 @@ function startSessionDiscovery(
   });
 
   return () => clearInterval(timer);
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
 }
 
 export { startSessionDiscovery };

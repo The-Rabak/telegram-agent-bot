@@ -16,6 +16,9 @@ const TOOL_APPROVAL_PATTERNS = [
   /\?\s*\[y\/N\]/i,
 ];
 
+const NUMBERED_CHOICE_PATTERN = /^\s*(\d+)\.\s+(.+)/;
+const CHOICE_PROMPT_ENDINGS = /(?:select|choose|pick|option|which)\s*[?:]/i;
+
 interface SessionState {
   previousCapture: string;
   currentMessageId: number | null;
@@ -64,10 +67,35 @@ function detectToolApproval(content: string): boolean {
   return TOOL_APPROVAL_PATTERNS.some((pattern) => pattern.test(content));
 }
 
+function detectNumberedChoices(content: string): { label: string; value: string }[] | null {
+  const lines = content.split("\n");
+  const choices: { label: string; value: string }[] = [];
+
+  // Scan from the bottom up to find the most recent set of numbered options
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    const match = line.match(NUMBERED_CHOICE_PATTERN);
+    if (match) {
+      choices.unshift({ label: `${match[1]}. ${match[2].trim()}`, value: match[1] });
+    } else if (choices.length >= 2) {
+      // We found 2+ numbered items and hit a non-numbered line -- stop
+      break;
+    } else {
+      // Not enough numbered items found yet, reset
+      choices.length = 0;
+    }
+  }
+
+  return choices.length >= 2 ? choices : null;
+}
+
 function createOutputMonitor(
   bot: Bot<AppContext>,
   tmux: TmuxManager,
   sessionMapper: SessionMapper,
+  fileWatcher?: { stop(projectRoot: string): void },
 ) {
   const activeSessions = new Set<string>();
   const sessionStates = new Map<string, SessionState>();
@@ -193,6 +221,37 @@ function createOutputMonitor(
     }
   }
 
+  async function sendChoicePrompt(
+    sessionName: string,
+    topicId: number,
+    choices: { label: string; value: string }[],
+  ): Promise<void> {
+    const chatId = config.CHAT_ID;
+    const keyboard = new InlineKeyboard();
+
+    // Add each choice as a button (max 4 per row, use rows for readability)
+    for (const choice of choices.slice(0, 8)) { // Cap at 8 buttons
+      keyboard.text(choice.label.slice(0, 30), `approval:${sessionName}:${choice.value}`);
+      keyboard.row();
+    }
+
+    try {
+      await bot.api.sendMessage(
+        chatId,
+        "Select an option:",
+        {
+          message_thread_id: topicId,
+          reply_markup: keyboard,
+        },
+      );
+    } catch (err: unknown) {
+      console.error(
+        `[OutputMonitor] Failed to send choice prompt for "${sessionName}":`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
   async function pollSession(sessionName: string): Promise<void> {
     const mapping = sessionMapper.getBySession(sessionName);
     if (!mapping) {
@@ -221,6 +280,11 @@ function createOutputMonitor(
         // Best effort notification
       }
 
+      // Stop file watcher for this session's project root
+      if (mapping) {
+        fileWatcher?.stop(mapping.projectRoot);
+      }
+
       activeSessions.delete(sessionName);
       sessionStates.delete(sessionName);
       sessionMapper.remove(sessionName);
@@ -247,6 +311,15 @@ function createOutputMonitor(
       await sendApprovalPrompt(sessionName, mapping.topicId);
     } else if (!hasApprovalPrompt) {
       state.lastApprovalPromptSent = false;
+    }
+
+    // Check for numbered choice patterns
+    if (!hasApprovalPrompt) {
+      const choices = detectNumberedChoices(currentCapture);
+      if (choices && !state.lastApprovalPromptSent) {
+        state.lastApprovalPromptSent = true;
+        await sendChoicePrompt(sessionName, mapping.topicId, choices);
+      }
     }
 
     // Accumulate content
@@ -287,31 +360,20 @@ function createOutputMonitor(
   }
 
   function registerCallbackHandlers(): void {
-    bot.callbackQuery(/^approval:(.+):(yes|no|always)$/, async (ctx) => {
+    bot.callbackQuery(/^approval:([^:]+):(.+)$/, async (ctx) => {
       const match = ctx.callbackQuery.data.match(
-        /^approval:(.+):(yes|no|always)$/,
+        /^approval:([^:]+):(.+)$/,
       );
       if (!match) return;
 
       const sessionName = match[1];
-      const action = match[2];
+      const value = match[2];
 
-      let keystroke: string;
-      switch (action) {
-        case "yes":
-          keystroke = "y";
-          break;
-        case "no":
-          keystroke = "n";
-          break;
-        case "always":
-          keystroke = "a";
-          break;
-        default:
-          return;
-      }
+      // Map known words to single chars, otherwise send as-is
+      const keystrokeMap: Record<string, string> = { yes: "y", no: "n", always: "a" };
+      const keystroke = keystrokeMap[value] ?? value;
 
-      const result = await tmux.sendKeys(sessionName, keystroke);
+      const result = await tmux.sendKeysRaw(sessionName, keystroke);
 
       if (result.ok) {
         await ctx.answerCallbackQuery({ text: `Sent "${keystroke}" to session` });

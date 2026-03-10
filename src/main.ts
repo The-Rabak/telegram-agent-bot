@@ -75,6 +75,13 @@ async function main() {
 
   // Validate bot token
   const me = await bot.api.getMe();
+  await bot.api.setMyCommands([
+    { command: "sessions", description: "List all tmux sessions" },
+    { command: "stop", description: "Send Ctrl+C to the connected session" },
+    { command: "file", description: "Send a file from the project" },
+    { command: "tree", description: "Show project directory tree" },
+    { command: "disconnect", description: "Disconnect (keeps session running)" },
+  ]);
   console.log(`[Main] Bot: @${me.username}`);
   console.log(`[Main] Loaded sessions: ${sessionMapper.listAll().length}`);
   console.log(`[Main] Notify port: ${config.NOTIFY_PORT}`);
@@ -83,8 +90,8 @@ async function main() {
   );
 
   // Create services
-  const outputMonitor = createOutputMonitor(bot, tmux, sessionMapper);
   const fileWatcher = createFileWatcher(bot);
+  const outputMonitor = createOutputMonitor(bot, tmux, sessionMapper, fileWatcher);
   const notifyServer = createNotifyServer(bot, sessionMapper, tmux);
 
   // Register handlers (order matters - commands before general message handler)
@@ -111,7 +118,7 @@ async function main() {
   }
 
   // Graceful shutdown
-  const shutdown = () => {
+  const shutdown = async () => {
     console.log("[Main] Shutting down...");
     bot.stop();
     outputMonitor.stopAll();
@@ -119,10 +126,11 @@ async function main() {
     notifyServer.stop();
     stopDiscovery();
     sessionMapper.save();
-    process.exit(0);
+    // Allow up to 3 seconds for graceful drain, then force exit
+    setTimeout(() => process.exit(0), 3000);
   };
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", () => void shutdown());
+  process.once("SIGTERM", () => void shutdown());
 
   // Start bot
   await bot.start({

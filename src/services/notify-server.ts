@@ -3,12 +3,12 @@ import type { Server } from "node:http";
 import { z } from "zod";
 import { Bot, InlineKeyboard, InputFile } from "grammy";
 import { createReadStream } from "node:fs";
-import { realpath, stat } from "node:fs/promises";
-import { resolve, sep, basename } from "node:path";
+import { basename } from "node:path";
 import type { AppContext } from "../types/context.js";
 import type { SessionMapper } from "./session-mapper.js";
 import type { TmuxManager } from "./tmux-manager.js";
 import { config } from "../config.js";
+import { escapeHtml, resolveSecurePath } from "../utils.js";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -75,13 +75,6 @@ function jsonResponse(res: ServerResponse, statusCode: number, data: unknown): v
     "Content-Length": Buffer.byteLength(body),
   });
   res.end(body);
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
 }
 
 function ts(): string {
@@ -196,31 +189,6 @@ function createNotifyServer(
   }
 
   // -------------------------------------------------------------------------
-  // Path traversal protection
-  // -------------------------------------------------------------------------
-
-  async function resolveSecurePath(
-    filePath: string,
-    projectRoot: string,
-  ): Promise<string | null> {
-    const resolved = resolve(projectRoot, filePath);
-    try {
-      const realRoot = await realpath(projectRoot);
-      const realResolved = await realpath(resolved);
-      if (!realResolved.startsWith(realRoot + sep) && realResolved !== realRoot) {
-        return null;
-      }
-      const s = await stat(realResolved);
-      if (!s.isFile()) {
-        return null;
-      }
-      return realResolved;
-    } catch {
-      return null;
-    }
-  }
-
-  // -------------------------------------------------------------------------
   // Handle individual notification
   // -------------------------------------------------------------------------
 
@@ -294,10 +262,16 @@ function createNotifyServer(
         });
         // Store action values so the callback handler can send the right value to tmux
         if (actions.length > 0) {
+          const key = `${notification.session}:${sentMsg.message_id}`;
           pendingActions.set(
-            `${notification.session}:${sentMsg.message_id}`,
+            key,
             actions.map((a) => a.value),
           );
+
+          // Auto-expire after 1 hour
+          setTimeout(() => {
+            pendingActions.delete(key);
+          }, 60 * 60 * 1000);
         }
         return;
       }
@@ -368,7 +342,7 @@ function createNotifyServer(
 
     const actionValue = storedActions[actionIndex];
 
-    const result = await tmux.sendKeys(sessionName, actionValue);
+    const result = await tmux.sendKeysRaw(sessionName, actionValue);
 
     if (result.ok) {
       await ctx.answerCallbackQuery({ text: "Sent to session" });
@@ -416,7 +390,7 @@ function createNotifyServer(
     if (method === "POST" && url === "/notify") {
       let rawBody: string;
       try {
-        rawBody = await readBody(req, 1024);
+        rawBody = await readBody(req, 8192);
       } catch (err: unknown) {
         jsonResponse(res, 413, {
           error: err instanceof Error ? err.message : "Body too large",

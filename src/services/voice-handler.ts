@@ -1,6 +1,6 @@
 import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, rm, chmod, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, chmod } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Bot, InlineKeyboard } from "grammy";
@@ -8,21 +8,11 @@ import type { AppContext } from "../types/context.js";
 import type { TmuxManager } from "./tmux-manager.js";
 import type { SessionMapper } from "./session-mapper.js";
 import { config } from "../config.js";
+import { filteredEnv } from "../utils.js";
 
 const execFileAsync = promisify(execFileCb);
 
 const MAX_VOICE_DURATION_SEC = 60;
-
-// Filter BOT_TOKEN from child process environment
-const filteredEnv = Object.fromEntries(
-  Object.entries(process.env).filter(([k]) => k !== "BOT_TOKEN"),
-);
-
-// Store transcriptions keyed by message ID (callback data is limited to 64 bytes)
-const pendingTranscriptions = new Map<
-  string,
-  { text: string; sessionName: string }
->();
 
 function isVoiceConfigured(): boolean {
   return !!(
@@ -37,6 +27,12 @@ export function createVoiceHandler(
   tmux: TmuxManager,
   sessionMapper: SessionMapper,
 ): void {
+  // Store transcriptions keyed by message ID (callback data is limited to 64 bytes)
+  const pendingTranscriptions = new Map<
+    string,
+    { text: string; sessionName: string }
+  >();
+
   let transcriptionInProgress = false;
 
   bot.on("message:voice", async (ctx) => {
@@ -88,10 +84,8 @@ export function createVoiceHandler(
 
       // Download OGG from Telegram using the files plugin
       const file = await ctx.getFile();
-      // hydrateFiles adds .download() at runtime via API transformer
-      const downloaded = await (
-        file as typeof file & { download(path: string): Promise<string> }
-      ).download(oggPath);
+      // hydrateFiles adds .download() at runtime via FileFlavor<Context>
+      const downloaded = await file.download(oggPath);
 
       // Set file permissions on downloaded OGG
       await chmod(downloaded, 0o600);
@@ -104,9 +98,16 @@ export function createVoiceHandler(
       );
 
       // Transcribe with whisper.cpp
+      const whisperCli = config.WHISPER_CLI_PATH;
+      const whisperModel = config.WHISPER_MODEL_PATH;
+      if (!whisperCli || !whisperModel) {
+        await ctx.reply("Whisper not configured.", { message_thread_id: threadId });
+        return;
+      }
+
       const { stdout } = await execFileAsync(
-        config.WHISPER_CLI_PATH!,
-        ["-m", config.WHISPER_MODEL_PATH!, "-f", wavPath, "-nt", "-l", "en"],
+        whisperCli,
+        ["-m", whisperModel, "-f", wavPath, "-nt", "-l", "en"],
         { timeout: 30000, env: filteredEnv },
       );
 
@@ -128,6 +129,11 @@ export function createVoiceHandler(
         text: transcription,
         sessionName: mapping.tmuxSession,
       });
+
+      // Auto-expire after 1 hour
+      setTimeout(() => {
+        pendingTranscriptions.delete(msgKey);
+      }, 60 * 60 * 1000);
 
       // Build inline keyboard with Send and Cancel buttons
       const keyboard = new InlineKeyboard()

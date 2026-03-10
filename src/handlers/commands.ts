@@ -9,13 +9,14 @@ import type { OutputMonitor } from "../services/output-monitor.js";
 import type { FileWatcher } from "../services/file-watcher.js";
 import { EXCLUDED_DIRS } from "../constants.js";
 import { config } from "../config.js";
+import { escapeHtml, resolveSecurePath, resolveSecureDir } from "../utils.js";
 
 function registerCommands(
   bot: Bot<AppContext>,
   tmux: TmuxManager,
   sessionMapper: SessionMapper,
-  outputMonitor?: OutputMonitor,
-  fileWatcher?: FileWatcher,
+  outputMonitor: OutputMonitor,
+  fileWatcher: FileWatcher,
 ): void {
   // ── /sessions ──────────────────────────────────────────────────────
   bot.command("sessions", async (ctx) => {
@@ -100,28 +101,19 @@ function registerCommands(
     }
 
     // Security: resolve and verify containment
-    const resolved = path.resolve(mapping.projectRoot, filePath);
-    const realPath = await fs.promises.realpath(resolved).catch(() => null);
-    const realRoot = await fs.promises
-      .realpath(mapping.projectRoot)
-      .catch(() => null);
-
-    if (
-      !realPath ||
-      !realRoot ||
-      (!realPath.startsWith(realRoot + path.sep) && realPath !== realRoot)
-    ) {
-      await ctx.reply("Access denied: path is outside the project root.");
+    const realPath = await resolveSecurePath(filePath, mapping.projectRoot);
+    if (!realPath) {
+      await ctx.reply("Access denied or file not found.");
       return;
     }
 
     // Check file size
-    const stat = await fs.promises.stat(realPath).catch(() => null);
-    if (!stat || !stat.isFile()) {
+    const fileStat = await fs.promises.stat(realPath).catch(() => null);
+    if (!fileStat) {
       await ctx.reply("File not found.");
       return;
     }
-    if (stat.size > 50 * 1024 * 1024) {
+    if (fileStat.size > 50 * 1024 * 1024) {
       await ctx.reply("File exceeds 50MB Telegram limit.");
       return;
     }
@@ -147,34 +139,17 @@ function registerCommands(
     }
 
     const subdir = ctx.match?.trim();
-    const rootDir = subdir
-      ? path.resolve(mapping.projectRoot, subdir)
-      : mapping.projectRoot;
+    let rootDir: string;
 
-    // Path containment check for subdir
     if (subdir) {
-      const realPath = await fs.promises
-        .realpath(rootDir)
-        .catch(() => null);
-      const realRoot = await fs.promises
-        .realpath(mapping.projectRoot)
-        .catch(() => null);
-
-      if (
-        !realPath ||
-        !realRoot ||
-        (!realPath.startsWith(realRoot + path.sep) && realPath !== realRoot)
-      ) {
-        await ctx.reply("Access denied: path is outside the project root.");
+      const secureDir = await resolveSecureDir(subdir, mapping.projectRoot);
+      if (!secureDir) {
+        await ctx.reply("Access denied or directory not found.");
         return;
       }
-    }
-
-    // Verify directory exists
-    const dirStat = await fs.promises.stat(rootDir).catch(() => null);
-    if (!dirStat || !dirStat.isDirectory()) {
-      await ctx.reply("Directory not found.");
-      return;
+      rootDir = secureDir;
+    } else {
+      rootDir = mapping.projectRoot;
     }
 
     // Build tree
@@ -249,8 +224,8 @@ function registerCommands(
       return;
     }
 
-    outputMonitor?.stop(mapping.tmuxSession);
-    fileWatcher?.stop(mapping.projectRoot);
+    outputMonitor.stop(mapping.tmuxSession);
+    fileWatcher.stop(mapping.projectRoot);
     sessionMapper.remove(mapping.tmuxSession);
 
     await ctx.reply(
@@ -265,13 +240,6 @@ function registerCommands(
       // May not have permission or topic may already be closed
     }
   });
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
 }
 
 export { registerCommands };
