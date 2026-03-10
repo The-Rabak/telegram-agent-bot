@@ -1,0 +1,16 @@
+export const EXCLUDED_DIRS = new Set([
+  "node_modules",
+  "vendor",
+  ".git",
+  "dist",
+  "build",
+  "__pycache__",
+  ".venv",
+  "venv",
+  ".next",
+  ".nuxt",
+  "coverage",
+  ".tox",
+  ".cache",
+  ".turbo",
+]);
