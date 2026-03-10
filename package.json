@@ -1,0 +1,24 @@
+{
+  "name": "telegram-agent-bridge",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "build": "tsc",
+    "dev": "tsx watch src/main.ts"
+  },
+  "dependencies": {
+    "@grammyjs/auto-retry": "^2.0.2",
+    "@grammyjs/files": "^1.1.1",
+    "@grammyjs/parse-mode": "^1.10.0",
+    "dotenv": "^16.4.7",
+    "grammy": "^1.35.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
