@@ -352,16 +352,32 @@ The tmux bridge is tool-agnostic — output streaming, two-way messaging, file w
 
 For Copilot CLI and other tools, `shell/bridge-helpers.sh` provides equivalent wrappers.
 
-### Setup
+### Install GitHub Copilot CLI
 
-Source the helpers in your `.zshrc` or `.bashrc`:
+You need the [GitHub CLI](https://cli.github.com) and the Copilot extension:
+
+```bash
+# Install GitHub CLI
+brew install gh
+
+# Authenticate
+gh auth login
+
+# Install the Copilot extension
+gh extension install github/gh-copilot
+
+# Verify
+gh copilot --version
+```
+
+### Source the Shell Helpers
 
 ```bash
 echo 'source /path/to/cli-agent-telegram-bot/shell/bridge-helpers.sh' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-### Copilot CLI
+### Use Copilot via the Bridge
 
 Use `cop` instead of `gh copilot`:
 
