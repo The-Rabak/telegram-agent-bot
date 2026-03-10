@@ -346,6 +346,60 @@ The skill is loaded automatically when Claude Code detects it in the project. No
 
 ---
 
+## Copilot CLI (and any other tool)
+
+The tmux bridge is tool-agnostic — output streaming, two-way messaging, file watching, and voice messages all work with any CLI running in a tmux session. The only Claude-specific part is the Stop hook that auto-notifies on completion.
+
+For Copilot CLI and other tools, `shell/bridge-helpers.sh` provides equivalent wrappers.
+
+### Setup
+
+Source the helpers in your `.zshrc` or `.bashrc`:
+
+```bash
+echo 'source /path/to/cli-agent-telegram-bot/shell/bridge-helpers.sh' >> ~/.zshrc
+source ~/.zshrc
+```
+
+### Copilot CLI
+
+Use `cop` instead of `gh copilot`:
+
+```bash
+cop suggest "delete all stopped docker containers"
+cop explain "awk '{print $1}' file.txt"
+```
+
+When Copilot finishes, you get a ✅ or ❌ notification on Telegram automatically.
+
+### Any Command
+
+Wrap any long-running command with `run-and-notify`:
+
+```bash
+run-and-notify npm test
+run-and-notify make build
+run-and-notify python train.py
+```
+
+### Manual Notifications from Shell Scripts
+
+```bash
+notify success "Deployment to staging complete"
+notify error "Integration tests failed"
+notify warning "Disk usage above 90%"
+```
+
+### Available Shell Helpers
+
+| Function | Description |
+|---|---|
+| `cop <args>` | `gh copilot` wrapper — notifies on completion |
+| `run-and-notify <cmd>` | Run any command, notify when done |
+| `notify <type> <msg>` | Send a custom notification |
+
+---
+
 ## Architecture
 
 ```
