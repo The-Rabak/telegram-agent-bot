@@ -3,6 +3,7 @@ import type { AppContext } from "../types/context.js";
 import type { TmuxManager } from "./tmux-manager.js";
 import type { SessionMapper } from "./session-mapper.js";
 import { config } from "../config.js";
+import { escapeHtml } from "../utils.js";
 
 const POLL_INTERVAL_MS = 2000;
 const MAX_MESSAGE_LENGTH = 4096;
@@ -17,7 +18,12 @@ const TOOL_APPROVAL_PATTERNS = [
 ];
 
 const NUMBERED_CHOICE_PATTERN = /^\s*(\d+)\.\s+(.+)/;
-const CHOICE_PROMPT_ENDINGS = /(?:select|choose|pick|option|which)\s*[?:]/i;
+const PRE_TAG_OVERHEAD = 11; // "<pre></pre>".length
+
+/** Collapse excessive trailing blank lines from tmux captures to at most one. */
+function stripTrailingBlanks(text: string): string {
+  return text.replace(/\n{3,}$/g, "\n");
+}
 
 interface SessionState {
   previousCapture: string;
@@ -25,6 +31,7 @@ interface SessionState {
   accumulatedContent: string;
   debounceMultiplier: number;
   lastApprovalPromptSent: boolean;
+  lastChoicePromptSent: boolean;
   pollsSinceLastEdit: number;
 }
 
@@ -35,6 +42,7 @@ function createDefaultSessionState(): SessionState {
     accumulatedContent: "",
     debounceMultiplier: 1,
     lastApprovalPromptSent: false,
+    lastChoicePromptSent: false,
     pollsSinceLastEdit: 0,
   };
 }
@@ -70,6 +78,8 @@ function detectToolApproval(content: string): boolean {
 function detectNumberedChoices(content: string): { label: string; value: string }[] | null {
   const lines = content.split("\n");
   const choices: { label: string; value: string }[] = [];
+  const MAX_GAP = 3; // Allow up to 3 non-numbered lines between items (wrapped descriptions)
+  let gap = 0;
 
   // Scan from the bottom up to find the most recent set of numbered options
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -79,12 +89,17 @@ function detectNumberedChoices(content: string): { label: string; value: string 
     const match = line.match(NUMBERED_CHOICE_PATTERN);
     if (match) {
       choices.unshift({ label: `${match[1]}. ${match[2].trim()}`, value: match[1] });
+      gap = 0;
     } else if (choices.length >= 2) {
-      // We found 2+ numbered items and hit a non-numbered line -- stop
-      break;
+      gap++;
+      if (gap > MAX_GAP) {
+        // Too many non-numbered lines in a row — stop collecting
+        break;
+      }
     } else {
       // Not enough numbered items found yet, reset
       choices.length = 0;
+      gap = 0;
     }
   }
 
@@ -126,13 +141,19 @@ function createOutputMonitor(
 
     const chatId = config.CHAT_ID;
 
-    // Trim content to stay within Telegram limits
-    let textToSend = content;
-    if (textToSend.length > MAX_MESSAGE_LENGTH) {
-      textToSend = textToSend.slice(-MAX_MESSAGE_LENGTH);
+    // Strip trailing blanks and escape HTML before formatting
+    let textToSend = escapeHtml(stripTrailingBlanks(content));
+
+    // Truncate to fit within Telegram limits, accounting for <pre></pre> wrapper
+    const maxContent = MAX_MESSAGE_LENGTH - PRE_TAG_OVERHEAD;
+    if (textToSend.length > maxContent) {
+      textToSend = textToSend.slice(-maxContent);
     }
 
     if (!textToSend.trim()) return;
+
+    // Wrap in <pre> for monospace rendering with preserved whitespace
+    textToSend = `<pre>${textToSend}</pre>`;
 
     try {
       if (state.currentMessageId === null) {
@@ -230,8 +251,8 @@ function createOutputMonitor(
     const keyboard = new InlineKeyboard();
 
     // Add each choice as a button (max 4 per row, use rows for readability)
-    for (const choice of choices.slice(0, 8)) { // Cap at 8 buttons
-      keyboard.text(choice.label.slice(0, 30), `approval:${sessionName}:${choice.value}`);
+    for (const choice of choices.slice(0, 10)) { // Cap at 10 buttons
+      keyboard.text(choice.label.slice(0, 50), `approval:${sessionName}:${choice.value}`);
       keyboard.row();
     }
 
@@ -316,9 +337,11 @@ function createOutputMonitor(
     // Check for numbered choice patterns
     if (!hasApprovalPrompt) {
       const choices = detectNumberedChoices(currentCapture);
-      if (choices && !state.lastApprovalPromptSent) {
-        state.lastApprovalPromptSent = true;
+      if (choices && !state.lastChoicePromptSent) {
+        state.lastChoicePromptSent = true;
         await sendChoicePrompt(sessionName, mapping.topicId, choices);
+      } else if (!choices) {
+        state.lastChoicePromptSent = false;
       }
     }
 
