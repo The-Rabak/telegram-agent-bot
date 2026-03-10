@@ -5,12 +5,17 @@ import type { Bot } from "grammy";
 import type { AppContext } from "../types/context.js";
 import type { TmuxManager } from "../services/tmux-manager.js";
 import type { SessionMapper } from "../services/session-mapper.js";
+import type { OutputMonitor } from "../services/output-monitor.js";
+import type { FileWatcher } from "../services/file-watcher.js";
 import { EXCLUDED_DIRS } from "../constants.js";
+import { config } from "../config.js";
 
 function registerCommands(
   bot: Bot<AppContext>,
   tmux: TmuxManager,
   sessionMapper: SessionMapper,
+  outputMonitor?: OutputMonitor,
+  fileWatcher?: FileWatcher,
 ): void {
   // ── /sessions ──────────────────────────────────────────────────────
   bot.command("sessions", async (ctx) => {
@@ -229,6 +234,36 @@ function registerCommands(
     await ctx.reply(`<pre>${escapeHtml(tree)}</pre>`, {
       parse_mode: "HTML",
     });
+  });
+
+  // ── /disconnect ──────────────────────────────────────────────────
+  bot.command("disconnect", async (ctx) => {
+    const threadId = ctx.message?.message_thread_id;
+    if (!threadId) {
+      await ctx.reply("Use /disconnect in a connected session topic.");
+      return;
+    }
+    const mapping = sessionMapper.getByTopic(threadId);
+    if (!mapping) {
+      await ctx.reply("This topic is not connected.");
+      return;
+    }
+
+    outputMonitor?.stop(mapping.tmuxSession);
+    fileWatcher?.stop(mapping.projectRoot);
+    sessionMapper.remove(mapping.tmuxSession);
+
+    await ctx.reply(
+      `Disconnected from session <code>${escapeHtml(mapping.tmuxSession)}</code>. Session is still running in tmux.`,
+      { parse_mode: "HTML" },
+    );
+
+    // Try to close the topic
+    try {
+      await bot.api.closeForumTopic(config.CHAT_ID, threadId);
+    } catch {
+      // May not have permission or topic may already be closed
+    }
   });
 }
 

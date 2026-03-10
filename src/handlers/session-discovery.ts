@@ -3,6 +3,8 @@ import { InlineKeyboard } from "grammy";
 import type { AppContext } from "../types/context.js";
 import type { TmuxManager } from "../services/tmux-manager.js";
 import type { SessionMapper } from "../services/session-mapper.js";
+import type { OutputMonitor } from "../services/output-monitor.js";
+import type { FileWatcher } from "../services/file-watcher.js";
 import { config } from "../config.js";
 
 const POLL_INTERVAL_MS = 10_000;
@@ -11,6 +13,8 @@ function startSessionDiscovery(
   bot: Bot<AppContext>,
   tmux: TmuxManager,
   sessionMapper: SessionMapper,
+  outputMonitor?: OutputMonitor,
+  fileWatcher?: FileWatcher,
 ): () => void {
   const ignoredSessions = new Set<string>();
 
@@ -66,6 +70,10 @@ function startSessionDiscovery(
     const workingDir = dirResult.ok ? dirResult.data : "/unknown";
 
     sessionMapper.add(sessionName, topic.message_thread_id, workingDir);
+
+    // Start monitoring for the newly connected session
+    outputMonitor?.start(sessionName);
+    fileWatcher?.start(workingDir, config.CHAT_ID, topic.message_thread_id);
 
     await bot.api.sendMessage(
       config.CHAT_ID,
