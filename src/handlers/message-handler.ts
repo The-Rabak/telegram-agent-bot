@@ -1,11 +1,11 @@
 import type { Bot } from "grammy";
 import type { AppContext } from "../types/context.js";
-import type { TmuxManager } from "../services/tmux-manager.js";
+import type { TerminalBackend } from "../types/terminal-backend.js";
 import type { SessionMapper } from "../services/session-mapper.js";
 
 export function registerMessageHandler(
   bot: Bot<AppContext>,
-  tmux: TmuxManager,
+  backend: TerminalBackend,
   sessionMapper: SessionMapper,
 ): void {
   bot.on("message:text", async (ctx) => {
@@ -15,7 +15,7 @@ export function registerMessageHandler(
     const mapping = sessionMapper.getByTopic(threadId);
     if (!mapping) return; // Not a mapped topic, ignore silently
 
-    const result = await tmux.sendKeys(mapping.tmuxSession, ctx.message.text);
+    const result = await backend.sendKeys(mapping.sessionId, ctx.message.text);
     if (!result.ok) {
       await ctx.reply(`Failed to send: ${result.error.message}`);
       return;

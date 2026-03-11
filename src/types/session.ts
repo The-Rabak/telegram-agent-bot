@@ -1,15 +1,13 @@
+export type { TerminalSession } from "./terminal-backend.js";
+
 interface SessionMapping {
-  readonly tmuxSession: string;
+  readonly sessionId: string;
+  readonly backend: "tmux" | "node-pty";
   readonly topicId: number;
   readonly projectRoot: string;
   readonly createdAt: Date;
+  readonly pid?: number;
+  readonly processStartTime?: number;
 }
 
-interface TmuxSession {
-  readonly name: string;
-  readonly attached: boolean;
-  readonly windows: number;
-  readonly created: Date;
-}
-
-export type { SessionMapping, TmuxSession };
+export type { SessionMapping };

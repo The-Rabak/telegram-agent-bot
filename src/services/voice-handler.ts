@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Bot, InlineKeyboard } from "grammy";
 import type { AppContext } from "../types/context.js";
-import type { TmuxManager } from "./tmux-manager.js";
+import type { TerminalBackend } from "../types/terminal-backend.js";
 import type { SessionMapper } from "./session-mapper.js";
 import { config } from "../config.js";
 import { filteredEnv } from "../utils.js";
@@ -24,7 +24,7 @@ function isVoiceConfigured(): boolean {
 
 export function createVoiceHandler(
   bot: Bot<AppContext>,
-  tmux: TmuxManager,
+  backend: TerminalBackend,
   sessionMapper: SessionMapper,
 ): void {
   // Store transcriptions keyed by message ID (callback data is limited to 64 bytes)
@@ -127,7 +127,7 @@ export function createVoiceHandler(
       // Store transcription and session name for callback retrieval
       pendingTranscriptions.set(msgKey, {
         text: transcription,
-        sessionName: mapping.tmuxSession,
+        sessionName: mapping.sessionId,
       });
 
       // Auto-expire after 1 hour
@@ -173,7 +173,7 @@ export function createVoiceHandler(
     }
   });
 
-  // Callback handler: Send transcription to tmux
+  // Callback handler: Send transcription to terminal
   bot.callbackQuery(/^voice-send:(.+)$/, async (ctx) => {
     const match = ctx.match;
     const msgKey = match[1];
@@ -184,10 +184,10 @@ export function createVoiceHandler(
       return;
     }
 
-    // Forward text to tmux
-    const result = await tmux.sendKeys(pending.sessionName, pending.text);
+    // Forward text to terminal
+    const result = await backend.sendKeys(pending.sessionName, pending.text);
     if (!result.ok) {
-      await ctx.answerCallbackQuery("Failed to send to tmux.");
+      await ctx.answerCallbackQuery("Failed to send to terminal.");
       return;
     }
 

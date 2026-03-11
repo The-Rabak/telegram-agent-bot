@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import { homedir } from "node:os";
 import { InputFile } from "grammy";
 import type { Bot } from "grammy";
 import type { AppContext } from "../types/context.js";
-import type { TmuxManager } from "../services/tmux-manager.js";
+import type { TerminalBackend, SessionDiscoverable } from "../types/terminal-backend.js";
 import type { SessionMapper } from "../services/session-mapper.js";
 import type { OutputMonitor } from "../services/output-monitor.js";
 import type { FileWatcher } from "../services/file-watcher.js";
@@ -11,19 +12,40 @@ import { EXCLUDED_DIRS } from "../constants.js";
 import { config } from "../config.js";
 import { escapeHtml, resolveSecurePath, resolveSecureDir } from "../utils.js";
 
+function isDiscoverable(b: TerminalBackend): b is TerminalBackend & SessionDiscoverable {
+  return typeof (b as unknown as SessionDiscoverable).listSessions === "function";
+}
+
 function registerCommands(
   bot: Bot<AppContext>,
-  tmux: TmuxManager,
+  backend: TerminalBackend,
   sessionMapper: SessionMapper,
   outputMonitor: OutputMonitor,
   fileWatcher: FileWatcher,
 ): void {
   // ── /sessions ──────────────────────────────────────────────────────
   bot.command("sessions", async (ctx) => {
-    const result = await tmux.listSessions();
+    if (!isDiscoverable(backend)) {
+      // For node-pty, list only the sessions we know about
+      const all = sessionMapper.listAll();
+      if (all.length === 0) {
+        await ctx.reply("No terminal sessions. Use /new to create one.", { parse_mode: "HTML" });
+        return;
+      }
+      const lines: string[] = ["<b>Terminal Sessions</b>", ""];
+      for (const mapping of all) {
+        lines.push(`<code>${escapeHtml(mapping.sessionId)}</code>`);
+        lines.push(`  \u2705 Connected (topic #${mapping.topicId})`);
+        lines.push("");
+      }
+      await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+      return;
+    }
+
+    const result = await backend.listSessions();
 
     if (!result.ok) {
-      await ctx.reply("Failed to list tmux sessions.", {
+      await ctx.reply("Failed to list terminal sessions.", {
         parse_mode: "HTML",
       });
       return;
@@ -32,11 +54,11 @@ function registerCommands(
     const sessions = result.data;
 
     if (sessions.length === 0) {
-      await ctx.reply("No tmux sessions found.", { parse_mode: "HTML" });
+      await ctx.reply("No terminal sessions found.", { parse_mode: "HTML" });
       return;
     }
 
-    const lines: string[] = ["<b>tmux Sessions</b>", ""];
+    const lines: string[] = ["<b>Terminal Sessions</b>", ""];
 
     for (const session of sessions) {
       const status = session.attached ? "attached" : "detached";
@@ -67,13 +89,13 @@ function registerCommands(
     }
     const mapping = sessionMapper.getByTopic(threadId);
     if (!mapping) {
-      await ctx.reply("This topic is not connected to a tmux session.");
+      await ctx.reply("This topic is not connected to a terminal session.");
       return;
     }
-    const result = await tmux.sendInterrupt(mapping.tmuxSession);
+    const result = await backend.sendInterrupt(mapping.sessionId);
     if (result.ok) {
       await ctx.reply(
-        `Sent Ctrl+C to session <code>${escapeHtml(mapping.tmuxSession)}</code>`,
+        `Sent Ctrl+C to session <code>${escapeHtml(mapping.sessionId)}</code>`,
         { parse_mode: "HTML" },
       );
     } else {
@@ -90,7 +112,7 @@ function registerCommands(
     }
     const mapping = sessionMapper.getByTopic(threadId);
     if (!mapping) {
-      await ctx.reply("This topic is not connected to a tmux session.");
+      await ctx.reply("This topic is not connected to a terminal session.");
       return;
     }
 
@@ -134,7 +156,7 @@ function registerCommands(
     }
     const mapping = sessionMapper.getByTopic(threadId);
     if (!mapping) {
-      await ctx.reply("This topic is not connected to a tmux session.");
+      await ctx.reply("This topic is not connected to a terminal session.");
       return;
     }
 
@@ -224,21 +246,73 @@ function registerCommands(
       return;
     }
 
-    outputMonitor.stop(mapping.tmuxSession);
+    outputMonitor.stop(mapping.sessionId);
     fileWatcher.stop(mapping.projectRoot);
-    sessionMapper.remove(mapping.tmuxSession);
 
-    await ctx.reply(
-      `Disconnected from session <code>${escapeHtml(mapping.tmuxSession)}</code>. Session is still running in tmux.`,
-      { parse_mode: "HTML" },
-    );
+    // For node-pty: destroy the session (kills the PTY process)
+    if (backend.type === "node-pty") {
+      await backend.destroySession(mapping.sessionId);
+      sessionMapper.remove(mapping.sessionId);
+      await ctx.reply(
+        `Session <code>${escapeHtml(mapping.sessionId)}</code> terminated.`,
+        { parse_mode: "HTML" },
+      );
+    } else {
+      // For tmux: just disconnect (session keeps running)
+      sessionMapper.remove(mapping.sessionId);
+      await ctx.reply(
+        `Disconnected from session <code>${escapeHtml(mapping.sessionId)}</code>. Session is still running in tmux.`,
+        { parse_mode: "HTML" },
+      );
+    }
 
-    // Try to close the topic
     try {
       await bot.api.closeForumTopic(config.CHAT_ID, threadId);
     } catch {
-      // May not have permission or topic may already be closed
+      // May not have permission
     }
+  });
+
+  // ── /new ────────────────────────────────────────────────────────
+  bot.command("new", async (ctx) => {
+    // Only available when backend supports session creation (node-pty)
+    if (backend.type === "tmux") {
+      await ctx.reply("Sessions are discovered automatically with tmux. Start a tmux session and it will appear here.");
+      return;
+    }
+
+    // Parse name from command args
+    const name = ctx.match?.trim() || `pty-${Date.now()}`;
+
+    // Create session
+    const result = await backend.createSession({ id: name });
+    if (!result.ok) {
+      await ctx.reply(`Failed to create session: ${result.error.message}`);
+      return;
+    }
+
+    // Create forum topic
+    const topic = await bot.api.createForumTopic(config.CHAT_ID, name);
+
+    // Get working directory
+    const dirResult = await backend.getPaneWorkingDir(name);
+    const workingDir = dirResult.ok ? dirResult.data : homedir();
+
+    // Add to session mapper
+    sessionMapper.add(name, topic.message_thread_id, workingDir, "node-pty");
+
+    // Start monitoring
+    outputMonitor.start(name);
+    fileWatcher.start(workingDir, config.CHAT_ID, topic.message_thread_id);
+
+    await bot.api.sendMessage(
+      config.CHAT_ID,
+      `Created terminal session <code>${escapeHtml(name)}</code>\nWorking directory: <code>${escapeHtml(workingDir)}</code>`,
+      {
+        parse_mode: "HTML",
+        message_thread_id: topic.message_thread_id,
+      },
+    );
   });
 }
 
