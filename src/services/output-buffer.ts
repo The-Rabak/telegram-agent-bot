@@ -9,6 +9,9 @@
 const DEFAULT_MAX_LINES = 200;
 const DEFAULT_MAX_BYTES = 50 * 1024; // 50 KB — matches MAX_CAPTURE_BYTES in tmux-backend
 
+/** Matches a trailing partial ANSI escape sequence (e.g. `\x1b[38;2;25` without final byte). */
+const PARTIAL_ESC_RE = /\u001B(?:\[[\d;]*)?$/;
+
 function createOutputBuffer(
   maxLines = DEFAULT_MAX_LINES,
   maxBytes = DEFAULT_MAX_BYTES,
@@ -16,6 +19,7 @@ function createOutputBuffer(
   let lines: string[] = [];
   let totalBytes = 0;
   let pendingPartialLine = ""; // Data that hasn't been terminated by \n yet
+  let pendingEscape = ""; // Trailing partial ANSI escape held back until completed
 
   /**
    * Append raw PTY output to the buffer.
@@ -26,12 +30,22 @@ function createOutputBuffer(
    *    content, as emitted by progress bars and spinners.
    */
   function push(data: string): void {
-    const combined = pendingPartialLine + data;
+    let combined = pendingEscape + pendingPartialLine + data;
+
+    // Hold back any trailing partial ANSI escape sequence.
+    const partialMatch = combined.match(PARTIAL_ESC_RE);
+    if (partialMatch) {
+      pendingEscape = partialMatch[0];
+      combined = combined.slice(0, -pendingEscape.length);
+    } else {
+      pendingEscape = "";
+    }
 
     const parts = combined.split("\n");
 
-    // If data didn't end with \n the last element is an incomplete line.
-    pendingPartialLine = data.endsWith("\n") ? "" : (parts.pop() ?? "");
+    // If combined (after escape stripping) didn't end with \n,
+    // the last element is an incomplete line.
+    pendingPartialLine = combined.endsWith("\n") ? "" : (parts.pop() ?? "");
 
     for (const part of parts) {
       let line = part;
@@ -72,6 +86,7 @@ function createOutputBuffer(
     lines = [];
     totalBytes = 0;
     pendingPartialLine = "";
+    pendingEscape = "";
   }
 
   return { push, getContent, clear };

@@ -12,6 +12,34 @@ import { createCwdTracker } from "./cwd-tracker.js";
 import { createSafeEnv } from "../utils.js";
 import type { Config } from "../config.js";
 
+/**
+ * Strip C0 control characters (0x00-0x1F) from user input, EXCEPT:
+ * - \t (0x09) — tab
+ * - \n (0x0A) — newline (may appear in pasted text)
+ * - \r (0x0D) — carriage return (Enter)
+ *
+ * This prevents Telegram messages containing e.g. \x03 (Ctrl-C), \x04 (EOF),
+ * or \x1b (ESC) from being injected into the PTY. Users should use /stop for Ctrl-C.
+ */
+const UNSAFE_C0_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g;
+function stripControlChars(text: string): string {
+  return text.replace(UNSAFE_C0_RE, "");
+}
+
+/**
+ * On macOS, write large input in 512-byte chunks with 5ms delays to avoid
+ * canonical-mode input buffer overflow.
+ */
+async function writeChunked(pty: any, data: string): Promise<void> {
+  const CHUNK_SIZE = 512;
+  for (let i = 0; i < data.length; i += CHUNK_SIZE) {
+    pty.write(data.slice(i, i + CHUNK_SIZE));
+    if (i + CHUNK_SIZE < data.length) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+}
+
 interface PtySession {
   pty: any; // IPty from node-pty (dynamically imported)
   info: TerminalSession;
@@ -161,7 +189,12 @@ async function createNodePtyBackend(config: Config): Promise<TerminalBackend> {
       return fail(`Session "${target}" not found or not alive`);
     }
     try {
-      session.pty.write(text + "\r");
+      const sanitised = stripControlChars(text) + "\r";
+      if (platform() === "darwin") {
+        await writeChunked(session.pty, sanitised);
+      } else {
+        session.pty.write(sanitised);
+      }
       return ok(undefined);
     } catch (err) {
       return fail("Failed to send keys", err);
@@ -177,7 +210,7 @@ async function createNodePtyBackend(config: Config): Promise<TerminalBackend> {
       return fail(`Session "${target}" not found or not alive`);
     }
     try {
-      session.pty.write(text);
+      session.pty.write(stripControlChars(text));
       return ok(undefined);
     } catch (err) {
       return fail("Failed to send keys", err);
@@ -216,6 +249,13 @@ async function createNodePtyBackend(config: Config): Promise<TerminalBackend> {
     return ok(result);
   }
 
+  /**
+   * Returns the current working directory of the PTY process (for display).
+   *
+   * Note: this is the *mutable* CWD tracked via OSC 7 / /proc. The security
+   * boundary is enforced by `projectRoot` in the SessionMapping, which is set
+   * once at creation time by `sessionMapper.add()` and never updated.
+   */
   async function getPaneWorkingDir(target: string): Promise<Result<string>> {
     const session = sessions.get(target);
     if (!session) return fail(`Session "${target}" not found`);

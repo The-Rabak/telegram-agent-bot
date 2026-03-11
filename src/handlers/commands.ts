@@ -261,7 +261,7 @@ function registerCommands(
       // For tmux: just disconnect (session keeps running)
       sessionMapper.remove(mapping.sessionId);
       await ctx.reply(
-        `Disconnected from session <code>${escapeHtml(mapping.sessionId)}</code>. Session is still running in tmux.`,
+        `Disconnected from session <code>${escapeHtml(mapping.sessionId)}</code>. The terminal session is still running.`,
         { parse_mode: "HTML" },
       );
     }
@@ -277,7 +277,7 @@ function registerCommands(
   bot.command("new", async (ctx) => {
     // Only available when backend supports session creation (node-pty)
     if (backend.type === "tmux") {
-      await ctx.reply("Sessions are discovered automatically with tmux. Start a tmux session and it will appear here.");
+      await ctx.reply("Sessions are discovered automatically. Start a terminal session and it will appear here.");
       return;
     }
 

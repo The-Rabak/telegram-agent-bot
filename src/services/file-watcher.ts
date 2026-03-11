@@ -1,6 +1,6 @@
 import { watch, readFileSync, statSync } from "node:fs";
 import type { FSWatcher } from "node:fs";
-import { join, sep, extname } from "node:path";
+import { join, sep, extname, resolve } from "node:path";
 import { InputFile, Bot } from "grammy";
 import type { AppContext } from "../types/context.js";
 import { EXCLUDED_DIRS } from "../constants.js";
@@ -76,7 +76,7 @@ function createFileWatcher(bot: Bot<AppContext>) {
     try {
       await bot.api.sendDocument(
         chatId,
-        new InputFile(content, relativePath.split(sep).pop() ?? "file.md"),
+        new InputFile(content, relativePath.split(/[/\\]/).pop() ?? "file.md"),
         {
           message_thread_id: topicId,
           caption: `File changed: <code>${escapeHtml(relativePath)}</code>`,
@@ -92,6 +92,8 @@ function createFileWatcher(bot: Bot<AppContext>) {
   }
 
   function start(projectRoot: string, chatId: number, topicId: number): void {
+    projectRoot = resolve(projectRoot);
+
     // If already watching this root, stop first
     if (watchers.has(projectRoot)) {
       stop(projectRoot);
@@ -126,10 +128,11 @@ function createFileWatcher(bot: Bot<AppContext>) {
     );
 
     watcher.on("error", (err) => {
-      console.error(
-        `[FileWatcher] Watcher error for ${projectRoot}:`,
-        err.message,
-      );
+      if (err.message.includes("ENOSPC")) {
+        console.error("[FileWatcher] inotify watch limit reached. Increase /proc/sys/fs/inotify/max_user_watches");
+      } else {
+        console.error(`[FileWatcher] Watcher error for ${projectRoot}:`, err.message);
+      }
     });
 
     watchers.set(projectRoot, { watcher, chatId, topicId });

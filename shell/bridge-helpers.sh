@@ -8,19 +8,44 @@
 #   source /path/to/telegram-agent-bridge/shell/bridge-helpers.sh
 
 # ---------------------------------------------------------------------------
+# Internal helper: determine the current session name
+# ---------------------------------------------------------------------------
+_bridge_get_session() {
+  if [ -n "$TELEGRAM_BRIDGE_SESSION" ]; then
+    echo "$TELEGRAM_BRIDGE_SESSION"
+  else
+    tmux display-message -p '#{session_name}' 2>/dev/null
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Internal helper: send a notification to the bridge (silently, non-blocking)
 # ---------------------------------------------------------------------------
 _bridge_notify() {
-  local type="$1"
+  local type="${1:-info}"
   local message="$2"
   local session
-  session=$(tmux display-message -p '#{session_name}' 2>/dev/null) || return 0
-  [[ -z "$session" ]] && return 0
+  session="$(_bridge_get_session)"
 
-  curl -s -X POST http://localhost:3847/notify \
+  if [ -z "$session" ]; then
+    echo "[bridge] Warning: could not determine session name" >&2
+    return 1
+  fi
+
+  local payload
+  if command -v jq >/dev/null 2>&1; then
+    payload=$(jq -n --arg s "$session" --arg t "$type" --arg m "$message" \
+      '{session: $s, type: $t, message: $m}')
+  else
+    # Escape quotes for JSON
+    local esc_session="${session//\"/\\\"}"
+    local esc_message="${message//\"/\\\"}"
+    payload="{\"session\": \"${esc_session}\", \"type\": \"${type}\", \"message\": \"${esc_message}\"}"
+  fi
+
+  curl -s -X POST "http://localhost:${BRIDGE_PORT:-3847}/notify" \
     -H 'Content-Type: application/json' \
-    -d "{\"session\": \"$session\", \"type\": \"$type\", \"message\": \"$message\"}" \
-    2>/dev/null || true
+    -d "$payload" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
