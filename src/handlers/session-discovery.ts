@@ -1,7 +1,7 @@
 import type { Bot } from "grammy";
 import { InlineKeyboard } from "grammy";
 import type { AppContext } from "../types/context.js";
-import type { TmuxManager } from "../services/tmux-manager.js";
+import type { TerminalBackend, SessionDiscoverable } from "../types/terminal-backend.js";
 import type { SessionMapper } from "../services/session-mapper.js";
 import type { OutputMonitor } from "../services/output-monitor.js";
 import type { FileWatcher } from "../services/file-watcher.js";
@@ -12,16 +12,18 @@ const POLL_INTERVAL_MS = 10_000;
 
 function startSessionDiscovery(
   bot: Bot<AppContext>,
-  tmux: TmuxManager,
+  backend: TerminalBackend & SessionDiscoverable,
   sessionMapper: SessionMapper,
   outputMonitor: OutputMonitor,
   fileWatcher: FileWatcher,
 ): () => void {
+  if (backend.type === "node-pty") return () => {};
+
   const ignoredSessions = new Set<string>();
 
   const timer = setInterval(async () => {
     try {
-      const result = await tmux.listSessions();
+      const result = await backend.listSessions();
       if (!result.ok) {
         return;
       }
@@ -40,7 +42,7 @@ function startSessionDiscovery(
 
         await bot.api.sendMessage(
           config.CHAT_ID,
-          `\u{1F50D} New tmux session detected: <code>${escapeHtml(session.name)}</code>\nConnect to Telegram?`,
+          `\u{1F50D} New terminal session detected: <code>${escapeHtml(session.name)}</code>\nConnect to Telegram?`,
           {
             parse_mode: "HTML",
             reply_markup: keyboard,
@@ -59,7 +61,7 @@ function startSessionDiscovery(
   bot.callbackQuery(/^connect:(.+)$/, async (ctx) => {
     const sessionName = ctx.match[1];
 
-    const exists = await tmux.sessionExists(sessionName);
+    const exists = await backend.sessionExists(sessionName);
     if (!exists) {
       await ctx.answerCallbackQuery({ text: "Session no longer exists" });
       return;
@@ -67,7 +69,7 @@ function startSessionDiscovery(
 
     const topic = await bot.api.createForumTopic(config.CHAT_ID, sessionName);
 
-    const dirResult = await tmux.getPaneWorkingDir(sessionName);
+    const dirResult = await backend.getPaneWorkingDir(sessionName);
     const workingDir = dirResult.ok ? dirResult.data : "/unknown";
 
     sessionMapper.add(sessionName, topic.message_thread_id, workingDir);
@@ -78,7 +80,7 @@ function startSessionDiscovery(
 
     await bot.api.sendMessage(
       config.CHAT_ID,
-      `\u2705 Connected to tmux session <code>${escapeHtml(sessionName)}</code>\nWorking directory: <code>${escapeHtml(workingDir)}</code>`,
+      `\u2705 Connected to terminal session <code>${escapeHtml(sessionName)}</code>\nWorking directory: <code>${escapeHtml(workingDir)}</code>`,
       {
         parse_mode: "HTML",
         message_thread_id: topic.message_thread_id,

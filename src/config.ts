@@ -14,6 +14,12 @@ const configSchema = z.object({
   WHISPER_CLI_PATH: z.string().optional(),
   WHISPER_MODEL_PATH: z.string().optional(),
   FFMPEG_PATH: z.string().default("ffmpeg"),
+  TERMINAL_BACKEND: z.enum(["tmux", "node-pty", "auto"]).default("auto"),
+  MAX_PTY_SESSIONS: z.coerce.number().int().min(1).default(5),
+  PTY_COLS: z.coerce.number().int().min(1).default(120),
+  PTY_ROWS: z.coerce.number().int().min(1).default(40),
+  PTY_SHELL: z.string().optional(),
+  PTY_ENV_EXTRA: z.string().optional(),
 });
 
 export type Config = z.infer<typeof configSchema>;

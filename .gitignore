@@ -6,3 +6,5 @@ dist/
 *.js.map
 !tsconfig.json
 .claude/settings.local.json
+docs
+todos/

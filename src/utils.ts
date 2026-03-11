@@ -69,7 +69,50 @@ export async function resolveSecureDir(
   }
 }
 
-/** process.env with BOT_TOKEN removed, for child processes */
-export const filteredEnv: NodeJS.ProcessEnv = Object.fromEntries(
-  Object.entries(process.env).filter(([k]) => k !== "BOT_TOKEN"),
-);
+/**
+ * Allowlist of environment variables safe to pass to child processes.
+ * Only these variables are forwarded; everything else (tokens, secrets,
+ * API keys, database URLs, etc.) is excluded by default.
+ */
+const ENV_ALLOWLIST = new Set([
+  // System paths
+  "PATH", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+  // User identity
+  "USER", "USERNAME", "LOGNAME",
+  // Shell
+  "SHELL", "COMSPEC",
+  // Terminal
+  "TERM", "TERM_PROGRAM", "COLORTERM",
+  // Locale
+  "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES", "LC_COLLATE",
+  // Editor
+  "EDITOR", "VISUAL",
+  // System (Windows)
+  "SystemRoot", "SystemDrive", "SYSTEMROOT",
+  // Temp dirs
+  "TMPDIR", "TEMP", "TMP",
+  // Bridge session (set by node-pty backend)
+  "TELEGRAM_BRIDGE_SESSION",
+  // XDG dirs (Linux)
+  "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
+]);
+
+/**
+ * Build a safe environment object for child processes using an allowlist.
+ * Only variables in ENV_ALLOWLIST (plus any extras) are forwarded.
+ *
+ * @param extraVars - additional variable names to allow (e.g. from PTY_ENV_EXTRA)
+ */
+export function createSafeEnv(extraVars?: string[]): NodeJS.ProcessEnv {
+  const allowed = new Set(ENV_ALLOWLIST);
+  if (extraVars) {
+    for (const v of extraVars) allowed.add(v.trim());
+  }
+
+  return Object.fromEntries(
+    Object.entries(process.env).filter(([k]) => allowed.has(k)),
+  );
+}
+
+/** process.env filtered to safe variables only, for child processes */
+export const filteredEnv: NodeJS.ProcessEnv = createSafeEnv();

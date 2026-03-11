@@ -1,7 +1,8 @@
 import { Bot, GrammyError, InlineKeyboard } from "grammy";
 import type { AppContext } from "../types/context.js";
-import type { TmuxManager } from "./tmux-manager.js";
+import type { TerminalBackend } from "../types/terminal-backend.js";
 import type { SessionMapper } from "./session-mapper.js";
+import { normalizeTerminalOutput, formatForTelegram } from "./output-normalizer.js";
 import { config } from "../config.js";
 
 const POLL_INTERVAL_MS = 2000;
@@ -17,7 +18,6 @@ const TOOL_APPROVAL_PATTERNS = [
 ];
 
 const NUMBERED_CHOICE_PATTERN = /^\s*(\d+)\.\s+(.+)/;
-const CHOICE_PROMPT_ENDINGS = /(?:select|choose|pick|option|which)\s*[?:]/i;
 
 interface SessionState {
   previousCapture: string;
@@ -25,6 +25,7 @@ interface SessionState {
   accumulatedContent: string;
   debounceMultiplier: number;
   lastApprovalPromptSent: boolean;
+  lastChoicePromptSent: boolean;
   pollsSinceLastEdit: number;
 }
 
@@ -35,6 +36,7 @@ function createDefaultSessionState(): SessionState {
     accumulatedContent: "",
     debounceMultiplier: 1,
     lastApprovalPromptSent: false,
+    lastChoicePromptSent: false,
     pollsSinceLastEdit: 0,
   };
 }
@@ -70,6 +72,8 @@ function detectToolApproval(content: string): boolean {
 function detectNumberedChoices(content: string): { label: string; value: string }[] | null {
   const lines = content.split("\n");
   const choices: { label: string; value: string }[] = [];
+  const MAX_GAP = 3; // Allow up to 3 non-numbered lines between items (wrapped descriptions)
+  let gap = 0;
 
   // Scan from the bottom up to find the most recent set of numbered options
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -79,12 +83,17 @@ function detectNumberedChoices(content: string): { label: string; value: string 
     const match = line.match(NUMBERED_CHOICE_PATTERN);
     if (match) {
       choices.unshift({ label: `${match[1]}. ${match[2].trim()}`, value: match[1] });
+      gap = 0;
     } else if (choices.length >= 2) {
-      // We found 2+ numbered items and hit a non-numbered line -- stop
-      break;
+      gap++;
+      if (gap > MAX_GAP) {
+        // Too many non-numbered lines in a row — stop collecting
+        break;
+      }
     } else {
       // Not enough numbered items found yet, reset
       choices.length = 0;
+      gap = 0;
     }
   }
 
@@ -93,7 +102,7 @@ function detectNumberedChoices(content: string): { label: string; value: string 
 
 function createOutputMonitor(
   bot: Bot<AppContext>,
-  tmux: TmuxManager,
+  backend: TerminalBackend,
   sessionMapper: SessionMapper,
   fileWatcher?: { stop(projectRoot: string): void },
 ) {
@@ -126,13 +135,9 @@ function createOutputMonitor(
 
     const chatId = config.CHAT_ID;
 
-    // Trim content to stay within Telegram limits
-    let textToSend = content;
-    if (textToSend.length > MAX_MESSAGE_LENGTH) {
-      textToSend = textToSend.slice(-MAX_MESSAGE_LENGTH);
-    }
-
-    if (!textToSend.trim()) return;
+    // Format for Telegram: escape HTML, truncate to fit limits, wrap in <pre>
+    const textToSend = formatForTelegram(content, MAX_MESSAGE_LENGTH);
+    if (!textToSend) return;
 
     try {
       if (state.currentMessageId === null) {
@@ -230,8 +235,8 @@ function createOutputMonitor(
     const keyboard = new InlineKeyboard();
 
     // Add each choice as a button (max 4 per row, use rows for readability)
-    for (const choice of choices.slice(0, 8)) { // Cap at 8 buttons
-      keyboard.text(choice.label.slice(0, 30), `approval:${sessionName}:${choice.value}`);
+    for (const choice of choices.slice(0, 10)) { // Cap at 10 buttons
+      keyboard.text(choice.label.slice(0, 50), `approval:${sessionName}:${choice.value}`);
       keyboard.row();
     }
 
@@ -262,7 +267,7 @@ function createOutputMonitor(
     }
 
     const state = getOrCreateState(sessionName);
-    const captureResult = await tmux.capturePane(sessionName);
+    const captureResult = await backend.capturePane(sessionName);
 
     if (!captureResult.ok) {
       // Session likely died -- notify user and clean up
@@ -291,7 +296,8 @@ function createOutputMonitor(
       return;
     }
 
-    const currentCapture = captureResult.data;
+    // Normalize raw terminal output (strip ANSI, collapse blanks, etc.)
+    const currentCapture = normalizeTerminalOutput(captureResult.data);
 
     // Skip if nothing changed
     if (currentCapture === state.previousCapture) {
@@ -316,9 +322,11 @@ function createOutputMonitor(
     // Check for numbered choice patterns
     if (!hasApprovalPrompt) {
       const choices = detectNumberedChoices(currentCapture);
-      if (choices && !state.lastApprovalPromptSent) {
-        state.lastApprovalPromptSent = true;
+      if (choices && !state.lastChoicePromptSent) {
+        state.lastChoicePromptSent = true;
         await sendChoicePrompt(sessionName, mapping.topicId, choices);
+      } else if (!choices) {
+        state.lastChoicePromptSent = false;
       }
     }
 
@@ -373,7 +381,7 @@ function createOutputMonitor(
       const keystrokeMap: Record<string, string> = { yes: "y", no: "n", always: "a" };
       const keystroke = keystrokeMap[value] ?? value;
 
-      const result = await tmux.sendKeysRaw(sessionName, keystroke);
+      const result = await backend.sendKeysRaw(sessionName, keystroke);
 
       if (result.ok) {
         await ctx.answerCallbackQuery({ text: `Sent "${keystroke}" to session` });

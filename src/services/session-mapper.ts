@@ -8,23 +8,66 @@ import { isSymlink } from "../utils.js";
 const CONFIG_DIR = join(homedir(), ".telegram-agent-bridge");
 const SESSIONS_FILE = join(CONFIG_DIR, "sessions.json");
 
-const storedMappingSchema = z.object({
+const backendSchema = z.enum(["tmux", "node-pty"]);
+
+/** New format: sessionId + backend + optional pid/processStartTime */
+const newStoredMappingSchema = z.object({
+  sessionId: z.string(),
+  backend: backendSchema,
+  topicId: z.number(),
+  projectRoot: z.string(),
+  createdAt: z.string(),
+  pid: z.number().optional(),
+  processStartTime: z.number().optional(),
+});
+
+/** Old format: tmuxSession (no backend field) -- migrated on read */
+const oldStoredMappingSchema = z.object({
   tmuxSession: z.string(),
   topicId: z.number(),
   projectRoot: z.string(),
   createdAt: z.string(),
-});
+}).transform((old) => ({
+  sessionId: old.tmuxSession,
+  backend: "tmux" as const,
+  topicId: old.topicId,
+  projectRoot: old.projectRoot,
+  createdAt: old.createdAt,
+}));
+
+/** Accepts both old and new formats, always outputs the new format */
+const storedMappingSchema = z.union([newStoredMappingSchema, oldStoredMappingSchema]);
 
 interface StoredMapping {
-  readonly tmuxSession: string;
+  readonly sessionId: string;
+  readonly backend: "tmux" | "node-pty";
   readonly topicId: number;
   readonly projectRoot: string;
   readonly createdAt: string;
+  readonly pid?: number;
+  readonly processStartTime?: number;
+}
+
+/**
+ * Check whether a process with the given PID is still alive.
+ * Optionally verifies processStartTime to guard against PID reuse,
+ * but for now existence-checking is sufficient.
+ */
+function isPidAlive(pid: number, _expectedStartTime?: number): boolean {
+  try {
+    process.kill(pid, 0); // Signal 0: just check if process exists
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function ensureConfigDir(): void {
   if (!existsSync(CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { mode: 0o700, recursive: true });
+    mkdirSync(CONFIG_DIR, {
+      mode: process.platform !== "win32" ? 0o700 : undefined,
+      recursive: true,
+    });
   }
 }
 
@@ -69,14 +112,19 @@ function createSessionMapper() {
     }
 
     const data: StoredMapping[] = Array.from(mappings.values()).map((m) => ({
-      tmuxSession: m.tmuxSession,
+      sessionId: m.sessionId,
+      backend: m.backend,
       topicId: m.topicId,
       projectRoot: m.projectRoot,
       createdAt: m.createdAt.toISOString(),
+      ...(m.pid !== undefined ? { pid: m.pid } : {}),
+      ...(m.processStartTime !== undefined ? { processStartTime: m.processStartTime } : {}),
     }));
 
     writeFileSync(SESSIONS_FILE, JSON.stringify(data, null, 2), "utf-8");
-    chmodSync(SESSIONS_FILE, 0o600);
+    if (process.platform !== "win32") {
+      chmodSync(SESSIONS_FILE, 0o600);
+    }
   }
 
   async function load(
@@ -87,17 +135,38 @@ function createSessionMapper() {
     const stored = readFromDisk();
 
     for (const entry of stored) {
-      mappings.set(entry.tmuxSession, {
-        tmuxSession: entry.tmuxSession,
+      mappings.set(entry.sessionId, {
+        sessionId: entry.sessionId,
+        backend: entry.backend,
         topicId: entry.topicId,
         projectRoot: entry.projectRoot,
         createdAt: new Date(entry.createdAt),
+        ...(entry.pid !== undefined ? { pid: entry.pid } : {}),
+        ...(entry.processStartTime !== undefined ? { processStartTime: entry.processStartTime } : {}),
       });
     }
 
-    // Reconcile: remove sessions that no longer exist in tmux
+    // Reconcile: remove sessions that no longer exist
     const names = Array.from(mappings.keys());
     for (const name of names) {
+      const entry = mappings.get(name)!;
+
+      // node-pty sessions cannot be reattached after restart — kill orphaned
+      // processes and always remove the mapping.
+      if (entry.backend === "node-pty" && entry.pid) {
+        const pidAlive = isPidAlive(entry.pid, entry.processStartTime);
+        if (pidAlive) {
+          try {
+            process.kill(entry.pid, "SIGTERM");
+          } catch {
+            // Process already dead or permission denied
+          }
+        }
+        // Always remove node-pty sessions on restart (they can't be reattached)
+        mappings.delete(name);
+        continue; // Skip the normal sessionExists check
+      }
+
       const exists = await sessionExists(name);
       if (!exists) {
         mappings.delete(name);
@@ -129,12 +198,18 @@ function createSessionMapper() {
     sessionName: string,
     topicId: number,
     projectRoot: string,
+    backend: "tmux" | "node-pty" = "tmux",
+    pid?: number,
+    processStartTime?: number,
   ): void {
     mappings.set(sessionName, {
-      tmuxSession: sessionName,
+      sessionId: sessionName,
+      backend,
       topicId,
       projectRoot,
       createdAt: new Date(),
+      ...(pid !== undefined ? { pid } : {}),
+      ...(processStartTime !== undefined ? { processStartTime } : {}),
     });
     save();
   }
