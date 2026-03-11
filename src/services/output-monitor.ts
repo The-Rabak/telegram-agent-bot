@@ -1,9 +1,9 @@
 import { Bot, GrammyError, InlineKeyboard } from "grammy";
 import type { AppContext } from "../types/context.js";
-import type { TmuxManager } from "./tmux-manager.js";
+import type { TerminalBackend } from "../types/terminal-backend.js";
 import type { SessionMapper } from "./session-mapper.js";
+import { normalizeTerminalOutput, formatForTelegram } from "./output-normalizer.js";
 import { config } from "../config.js";
-import { escapeHtml } from "../utils.js";
 
 const POLL_INTERVAL_MS = 2000;
 const MAX_MESSAGE_LENGTH = 4096;
@@ -18,12 +18,6 @@ const TOOL_APPROVAL_PATTERNS = [
 ];
 
 const NUMBERED_CHOICE_PATTERN = /^\s*(\d+)\.\s+(.+)/;
-const PRE_TAG_OVERHEAD = 11; // "<pre></pre>".length
-
-/** Collapse excessive trailing blank lines from tmux captures to at most one. */
-function stripTrailingBlanks(text: string): string {
-  return text.replace(/\n{3,}$/g, "\n");
-}
 
 interface SessionState {
   previousCapture: string;
@@ -108,7 +102,7 @@ function detectNumberedChoices(content: string): { label: string; value: string 
 
 function createOutputMonitor(
   bot: Bot<AppContext>,
-  tmux: TmuxManager,
+  backend: TerminalBackend,
   sessionMapper: SessionMapper,
   fileWatcher?: { stop(projectRoot: string): void },
 ) {
@@ -141,19 +135,9 @@ function createOutputMonitor(
 
     const chatId = config.CHAT_ID;
 
-    // Strip trailing blanks and escape HTML before formatting
-    let textToSend = escapeHtml(stripTrailingBlanks(content));
-
-    // Truncate to fit within Telegram limits, accounting for <pre></pre> wrapper
-    const maxContent = MAX_MESSAGE_LENGTH - PRE_TAG_OVERHEAD;
-    if (textToSend.length > maxContent) {
-      textToSend = textToSend.slice(-maxContent);
-    }
-
-    if (!textToSend.trim()) return;
-
-    // Wrap in <pre> for monospace rendering with preserved whitespace
-    textToSend = `<pre>${textToSend}</pre>`;
+    // Format for Telegram: escape HTML, truncate to fit limits, wrap in <pre>
+    const textToSend = formatForTelegram(content, MAX_MESSAGE_LENGTH);
+    if (!textToSend) return;
 
     try {
       if (state.currentMessageId === null) {
@@ -283,7 +267,7 @@ function createOutputMonitor(
     }
 
     const state = getOrCreateState(sessionName);
-    const captureResult = await tmux.capturePane(sessionName);
+    const captureResult = await backend.capturePane(sessionName);
 
     if (!captureResult.ok) {
       // Session likely died -- notify user and clean up
@@ -312,7 +296,8 @@ function createOutputMonitor(
       return;
     }
 
-    const currentCapture = captureResult.data;
+    // Normalize raw terminal output (strip ANSI, collapse blanks, etc.)
+    const currentCapture = normalizeTerminalOutput(captureResult.data);
 
     // Skip if nothing changed
     if (currentCapture === state.previousCapture) {
@@ -396,7 +381,7 @@ function createOutputMonitor(
       const keystrokeMap: Record<string, string> = { yes: "y", no: "n", always: "a" };
       const keystroke = keystrokeMap[value] ?? value;
 
-      const result = await tmux.sendKeysRaw(sessionName, keystroke);
+      const result = await backend.sendKeysRaw(sessionName, keystroke);
 
       if (result.ok) {
         await ctx.answerCallbackQuery({ text: `Sent "${keystroke}" to session` });

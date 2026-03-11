@@ -6,7 +6,7 @@ import { createReadStream } from "node:fs";
 import { basename } from "node:path";
 import type { AppContext } from "../types/context.js";
 import type { SessionMapper } from "./session-mapper.js";
-import type { TmuxManager } from "./tmux-manager.js";
+import type { TerminalBackend } from "../types/terminal-backend.js";
 import { config } from "../config.js";
 import { escapeHtml, resolveSecurePath } from "../utils.js";
 
@@ -101,7 +101,7 @@ const DEBOUNCE_THRESHOLD = 5;
 function createNotifyServer(
   bot: Bot<AppContext>,
   sessionMapper: SessionMapper,
-  tmux: TmuxManager,
+  backend: TerminalBackend,
 ) {
   let server: Server | null = null;
 
@@ -260,7 +260,7 @@ function createNotifyServer(
           parse_mode: "HTML",
           reply_markup: keyboard,
         });
-        // Store action values so the callback handler can send the right value to tmux
+        // Store action values so the callback handler can send the right value to terminal
         if (actions.length > 0) {
           const key = `${notification.session}:${sentMsg.message_id}`;
           pendingActions.set(
@@ -342,7 +342,7 @@ function createNotifyServer(
 
     const actionValue = storedActions[actionIndex];
 
-    const result = await tmux.sendKeysRaw(sessionName, actionValue);
+    const result = await backend.sendKeysRaw(sessionName, actionValue);
 
     if (result.ok) {
       await ctx.answerCallbackQuery({ text: "Sent to session" });

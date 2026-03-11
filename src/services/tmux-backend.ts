@@ -2,7 +2,12 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { stripVTControlCharacters } from "node:util";
 import type { Result } from "../types/result.js";
-import type { TmuxSession } from "../types/session.js";
+import type {
+  TerminalBackend,
+  SessionDiscoverable,
+  TerminalSession,
+  CreateSessionOptions,
+} from "../types/terminal-backend.js";
 import { ok, fail } from "../types/result.js";
 import { config } from "../config.js";
 import { filteredEnv } from "../utils.js";
@@ -19,8 +24,8 @@ function getStderr(err: unknown): string {
   return "";
 }
 
-function createTmuxManager() {
-  async function listSessions(): Promise<Result<TmuxSession[]>> {
+function createTmuxBackend(): TerminalBackend & SessionDiscoverable {
+  async function listSessions(): Promise<Result<TerminalSession[]>> {
     try {
       const { stdout } = await execFileAsync(
         "tmux",
@@ -32,7 +37,7 @@ function createTmuxManager() {
         { env: filteredEnv },
       );
 
-      const sessions: TmuxSession[] = stdout
+      const sessions: TerminalSession[] = stdout
         .trim()
         .split("\n")
         .filter((line) => line.length > 0)
@@ -167,7 +172,30 @@ function createTmuxManager() {
     }
   }
 
+  async function createSession(options: CreateSessionOptions): Promise<Result<TerminalSession>> {
+    try {
+      const args = ["new-session", "-d", "-s", options.id];
+      if (options.cwd) args.push("-c", options.cwd);
+      await execFileAsync("tmux", args, { env: filteredEnv });
+      return ok({ name: options.id, attached: false, windows: 1, created: new Date() });
+    } catch (err) {
+      return fail("Failed to create tmux session", err);
+    }
+  }
+
+  async function destroySession(id: string): Promise<Result<void>> {
+    try {
+      await execFileAsync("tmux", ["kill-session", "-t", id], { env: filteredEnv });
+      return ok(undefined);
+    } catch (err) {
+      return fail("Failed to destroy tmux session", err);
+    }
+  }
+
+  async function dispose(): Promise<void> {}
+
   return {
+    type: "tmux" as const,
     listSessions,
     sessionExists,
     sendKeys,
@@ -175,10 +203,13 @@ function createTmuxManager() {
     sendInterrupt,
     capturePane,
     getPaneWorkingDir,
+    createSession,
+    destroySession,
+    dispose,
   };
 }
 
-type TmuxManager = ReturnType<typeof createTmuxManager>;
+type TmuxBackend = ReturnType<typeof createTmuxBackend>;
 
-export { createTmuxManager };
-export type { TmuxManager };
+export { createTmuxBackend };
+export type { TmuxBackend };

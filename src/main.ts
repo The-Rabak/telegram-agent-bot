@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { config } from "./config.js";
 import { createBot } from "./bot.js";
-import { createTmuxManager } from "./services/tmux-manager.js";
+import { createTerminalBackend } from "./services/terminal-backend-factory.js";
 import { createSessionMapper } from "./services/session-mapper.js";
 import { startSessionDiscovery } from "./handlers/session-discovery.js";
 import { registerCommands } from "./handlers/commands.js";
@@ -10,13 +10,9 @@ import { createOutputMonitor } from "./services/output-monitor.js";
 import { createFileWatcher } from "./services/file-watcher.js";
 import { createNotifyServer } from "./services/notify-server.js";
 import { createVoiceHandler } from "./services/voice-handler.js";
-import { execFile as execFileCb } from "node:child_process";
-import { promisify } from "node:util";
 import { readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-const execFileAsync = promisify(execFileCb);
 
 // Clean up orphaned temp files from previous crashes
 async function cleanupOrphanedTempFiles() {
@@ -45,30 +41,13 @@ async function main() {
   // Clean up orphaned temp files from previous crashes
   await cleanupOrphanedTempFiles();
 
-  // Startup validation
-  try {
-    await execFileAsync("which", ["tmux"]);
-  } catch {
-    console.error("[Main] tmux is not installed or not on PATH. Exiting.");
-    process.exit(1);
-  }
-
-  // Check optional dependencies
-  let voiceEnabled = false;
-  try {
-    const ffmpegPath = config.FFMPEG_PATH;
-    await execFileAsync("which", [ffmpegPath]);
-    if (config.WHISPER_CLI_PATH && config.WHISPER_MODEL_PATH) {
-      voiceEnabled = true;
-    }
-  } catch {
-    // ffmpeg not found
-  }
+  // Initialize terminal backend (auto-detects or uses config preference)
+  const backend = await createTerminalBackend(config);
+  console.log(`[Main] Backend: ${backend.type}`);
 
   // Initialize services
-  const tmux = createTmuxManager();
   const sessionMapper = createSessionMapper();
-  await sessionMapper.load((name) => tmux.sessionExists(name));
+  await sessionMapper.load((name) => backend.sessionExists(name));
 
   // Initialize bot
   const bot = createBot();
@@ -76,7 +55,7 @@ async function main() {
   // Validate bot token
   const me = await bot.api.getMe();
   await bot.api.setMyCommands([
-    { command: "sessions", description: "List all tmux sessions" },
+    { command: "sessions", description: "List all terminal sessions" },
     { command: "stop", description: "Send Ctrl+C to the connected session" },
     { command: "file", description: "Send a file from the project" },
     { command: "tree", description: "Show project directory tree" },
@@ -85,35 +64,36 @@ async function main() {
   console.log(`[Main] Bot: @${me.username}`);
   console.log(`[Main] Loaded sessions: ${sessionMapper.listAll().length}`);
   console.log(`[Main] Notify port: ${config.NOTIFY_PORT}`);
-  console.log(
-    `[Main] Voice: ${voiceEnabled ? "enabled" : "disabled (install ffmpeg + whisper.cpp)"}`,
-  );
 
   // Create services
   const fileWatcher = createFileWatcher(bot);
-  const outputMonitor = createOutputMonitor(bot, tmux, sessionMapper, fileWatcher);
-  const notifyServer = createNotifyServer(bot, sessionMapper, tmux);
+  const outputMonitor = createOutputMonitor(bot, backend, sessionMapper, fileWatcher);
+  const notifyServer = createNotifyServer(bot, sessionMapper, backend);
 
   // Register handlers (order matters - commands before general message handler)
-  registerCommands(bot, tmux, sessionMapper, outputMonitor, fileWatcher);
-  createVoiceHandler(bot, tmux, sessionMapper);
-  registerMessageHandler(bot, tmux, sessionMapper);
+  registerCommands(bot, backend, sessionMapper, outputMonitor, fileWatcher);
+  createVoiceHandler(bot, backend, sessionMapper);
+  registerMessageHandler(bot, backend, sessionMapper);
 
   // Start notification server
   notifyServer.start();
 
-  // Start session discovery (pass monitors so newly connected sessions auto-start)
-  const stopDiscovery = startSessionDiscovery(
-    bot,
-    tmux,
-    sessionMapper,
-    outputMonitor,
-    fileWatcher,
-  );
+  // Start session discovery (only for backends that support listing sessions)
+  let stopDiscovery = () => {};
+  if ("listSessions" in backend) {
+    stopDiscovery = startSessionDiscovery(
+      bot,
+      backend as import("./types/terminal-backend.js").TerminalBackend &
+        import("./types/terminal-backend.js").SessionDiscoverable,
+      sessionMapper,
+      outputMonitor,
+      fileWatcher,
+    );
+  }
 
   // Start monitoring for existing sessions
   for (const mapping of sessionMapper.listAll()) {
-    outputMonitor.start(mapping.tmuxSession);
+    outputMonitor.start(mapping.sessionId);
     fileWatcher.start(mapping.projectRoot, config.CHAT_ID, mapping.topicId);
   }
 
@@ -126,11 +106,20 @@ async function main() {
     notifyServer.stop();
     stopDiscovery();
     sessionMapper.save();
+    await backend.dispose();
     // Allow up to 3 seconds for graceful drain, then force exit
     setTimeout(() => process.exit(0), 3000);
   };
   process.once("SIGINT", () => void shutdown());
-  process.once("SIGTERM", () => void shutdown());
+  if (process.platform !== "win32") {
+    process.once("SIGTERM", () => void shutdown());
+  }
+
+  // Catch uncaught exceptions
+  process.on("uncaughtException", (err) => {
+    console.error("[Main] Uncaught:", err);
+    void backend.dispose().then(() => process.exit(1));
+  });
 
   // Start bot
   await bot.start({
